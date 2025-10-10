@@ -97,6 +97,8 @@ function verifySignature(payload, signature, secret) {
     crypto.createHmac('sha256', secret)
           .update(payload)
           .digest('hex');
+  log('Expected signature:', expectedSignature);
+  log('Actual signature:', signature);
   return crypto.timingSafeEqual(
     Buffer.from(signature),
     Buffer.from(expectedSignature)
@@ -164,6 +166,7 @@ app.post('/deploy/:projectName', async (req, res) => {
   // Verify webhook signature
   const signature = req.headers['x-hub-signature-256'];
   const payload = JSON.stringify(req.body);
+  log('Received payload:', payload);
   
   if (!signature || !verifySignature(payload, signature, project.secret)) {
     return res.status(401).json({ error: 'Invalid signature' });
