@@ -4,6 +4,8 @@ const { exec } = require('child_process');
 const fs = require('fs').promises;
 const path = require('path');
 const rateLimit = require('express-rate-limit');
+const { log } = require('console');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -18,9 +20,13 @@ app.use('/deploy', limiter);
 
 // Load environment configuration
 const PROJECTS = {};
+log('Loading project configuration...');
+log('the env has variables:', process.env);
 if (process.env.DEPLOY_PROJECTS) {
+  console.log('Loading project configuration from environment variable.');
   try {
     const projectsConfig = JSON.parse(process.env.DEPLOY_PROJECTS);
+    console.log('Loaded project configuration:', projectsConfig);
     Object.keys(projectsConfig).forEach(projectName => {
       PROJECTS[projectName] = {
         dir: projectsConfig[projectName].dir,
