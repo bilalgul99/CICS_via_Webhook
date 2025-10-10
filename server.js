@@ -16,7 +16,7 @@ const limiter = rateLimit({
   max: 10, // limit each IP to 10 requests per windowMs
   message: 'Too many deploy requests from this IP, please try again later.'
 });
-app.use('/deploy', limiter);
+//app.use('/deploy', limiter);
 
 // Load environment configuration
 const PROJECTS = {};
