@@ -127,7 +127,7 @@ async function deployProject(projectName, branch = 'main') {
     
     // Install dependencies
 //    await execPromise('npm ci --prefer-offline --no-audit --progress=false', project.dir);
-    await execPromise('npm ci', project.dir);
+    await execPromise('npm i', project.dir);
     
     // Build if needed (optional)
 //    if (fs.existsSync(path.join(project.dir, 'package.json'))) {
