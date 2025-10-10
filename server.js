@@ -1,7 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const { exec } = require('child_process');
-const fs = require('fs').promises;
+//const fs = require('fs').promises;
+const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { log } = require('console');
@@ -127,8 +129,10 @@ async function deployProject(projectName, branch = 'main') {
     await execPromise('npm ci --prefer-offline --no-audit --progress=false', project.dir);
     
     // Build if needed (optional)
-    if (fs.existsSync(path.join(project.dir, 'package.json'))) {
-      const packageJson = JSON.parse(await fs.readFile(path.join(project.dir, 'package.json'), 'utf8'));
+//    if (fs.existsSync(path.join(project.dir, 'package.json'))) {
+//      const packageJson = JSON.parse(await fs.readFile(path.join(project.dir, 'package.json'), 'utf8'));
+if (fs.existsSync(path.join(project.dir, 'package.json'))) {
+      const packageJson = JSON.parse(await fsp.readFile(path.join(project.dir, 'package.json'), 'utf8'));
       if (packageJson.scripts && packageJson.scripts.build) {
         await execPromise('npm run build', project.dir);
       }
@@ -167,7 +171,7 @@ app.post('/deploy/:projectName', async (req, res) => {
   const signature = req.headers['x-hub-signature-256'];
   const payload = JSON.stringify(req.body);
   log('Received payload:', payload);
-  
+
   if (!signature || !verifySignature(payload, signature, project.secret)) {
     return res.status(401).json({ error: 'Invalid signature' });
   }
