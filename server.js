@@ -210,7 +210,10 @@ app.get('/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, 'localhost', () => {
-  console.log(`Deploy webhook server running on port ${PORT}`);
+const HOST = process.env.HOST || 'localhost';
+
+app.listen(PORT, HOST, () => {
+  console.log(`Server running at http://${HOST}:${PORT}`);
   console.log(`Configured projects: ${Object.keys(PROJECTS).join(', ')}`);
 });
+
