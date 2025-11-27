@@ -34,12 +34,18 @@ app.use((req, res, next) => {
   const remoteIp = req.headers['x-forwarded-for'] || req.socket && req.socket.remoteAddress || req.ip;
   debugLog(req.requestId, 'Incoming', req.method, req.originalUrl, 'from', remoteIp);
   debugLog(req.requestId, 'Headers:', Object.assign({}, req.headers));
+  debugLog(req.requestId, 'Endpoint invoked:', req.method, req.originalUrl, 'path:', req.path, 'params:', req.params, 'query:', req.query);
   // Don't log huge bodies fully — show length and a safe preview
   if (req.body) {
     try {
       const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-      const preview = bodyStr.length > 1000 ? bodyStr.slice(0, 1000) + '...<truncated>' : bodyStr;
-      debugLog(req.requestId, 'Body size:', Buffer.byteLength(bodyStr, 'utf8'), 'preview:', preview);
+      const size = Buffer.byteLength(bodyStr, 'utf8');
+      if (size <= 5000) {
+        debugLog(req.requestId, 'Body size:', size, 'full body:', bodyStr);
+      } else {
+        const preview = bodyStr.length > 1000 ? bodyStr.slice(0, 1000) + '...<truncated>' : bodyStr;
+        debugLog(req.requestId, 'Body size:', size, 'preview:', preview);
+      }
     } catch (e) {
       debugLog(req.requestId, 'Body: <unserializable>');
     }
@@ -88,19 +94,23 @@ if (process.env.DEPLOY_PROJECTS) {
 const LOCK_FILE = '/tmp/deploy-webhook.lock';
 let isDeploying = false;
 
-function acquireLock() {
+function acquireLock(requestId) {
   return new Promise((resolve, reject) => {
+    debugLog(requestId, 'Attempting to acquire deploy lock');
     if (isDeploying) {
+      debugLog(requestId, 'Lock busy - another deployment in progress');
       reject(new Error('Another deployment is in progress'));
       return;
     }
     isDeploying = true;
+    debugLog(requestId, 'Lock acquired');
     resolve();
   });
 }
 
-function releaseLock() {
+function releaseLock(requestId) {
   isDeploying = false;
+  debugLog(requestId, 'Lock released');
 }
 
 // Execute shell commands with proper error handling
@@ -140,12 +150,12 @@ function execPromise(command, cwd, requestId) {
 }
 
 // Verify GitHub webhook signature
-function verifySignature(payload, signature, secret) {
+function verifySignature(payload, signature, secret, requestId) {
   try {
     const expectedHex = crypto.createHmac('sha256', secret).update(payload).digest('hex');
     const expectedSignature = 'sha256=' + expectedHex;
-    log('verifySignature expected:', expectedSignature);
-    log('verifySignature actual:', signature);
+    debugLog(requestId, 'verifySignature expected:', expectedSignature);
+    debugLog(requestId, 'verifySignature actual:', signature);
     if (!signature || typeof signature !== 'string') return false;
     // timingSafeEqual requires equal-length buffers
     const sigBuf = Buffer.from(signature);
@@ -154,9 +164,11 @@ function verifySignature(payload, signature, secret) {
       log('Signature length mismatch');
       return false;
     }
-    return crypto.timingSafeEqual(sigBuf, expBuf);
+    const ok = crypto.timingSafeEqual(sigBuf, expBuf);
+    debugLog(requestId, 'verifySignature result:', ok);
+    return ok;
   } catch (e) {
-    log('Signature verification error:', e && e.message);
+    debugLog(requestId, 'Signature verification error:', e && e.message);
     return false;
   }
 }
@@ -226,28 +238,32 @@ app.post('/deploy/:projectName', async (req, res) => {
   // Verify webhook signature
   const signature = req.headers['x-hub-signature-256'];
   const payload = JSON.stringify(req.body);
-  log('Received payload:', payload);
+  debugLog(req.requestId, 'Received payload (stringified):', payload);
 
-  if (!signature || !verifySignature(payload, signature, project.secret)) {
+  if (!signature || !verifySignature(payload, signature, project.secret, req.requestId)) {
+    debugLog(req.requestId, 'Signature invalid or missing - rejecting request');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
   // Verify branch (if specified in webhook)
   const branch = req.body.ref ? req.body.ref.replace('refs/heads/', '') : project.branch;
   if (branch !== project.branch) {
+    debugLog(req.requestId, 'Branch mismatch - ignoring deployment', 'payloadBranch:', branch, 'expectedBranch:', project.branch);
     return res.status(200).json({ 
       message: `Ignoring deployment: branch ${branch} != ${project.branch}` 
     });
   }
 
   try {
-    await acquireLock();
-    const result = await deployProject(projectName, branch);
-    releaseLock();
+    await acquireLock(req.requestId);
+    debugLog(req.requestId, 'Lock held, starting deployProject');
+    const result = await deployProject(projectName, branch, req.requestId);
+    debugLog(req.requestId, 'deployProject result:', result);
+    releaseLock(req.requestId);
     res.status(200).json({ success: true, message: result });
   } catch (error) {
-    releaseLock();
-    console.error('Deployment error:', error);
+    releaseLock(req.requestId);
+    debugLog(req.requestId, 'Deployment error:', error && error.message);
     res.status(500).json({ 
       success: false, 
       error: error.message || 'Deployment failed' 
