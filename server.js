@@ -12,6 +12,47 @@ require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+// Debugging helpers and per-request IDs for traceability
+function timeStamp() {
+  return new Date().toISOString();
+}
+
+function debugLog(requestId, ...args) {
+  const prefix = requestId ? `[${timeStamp()}] [req:${requestId}]` : `[${timeStamp()}]`;
+  console.log(prefix, ...args);
+}
+
+// Assign a request ID and log incoming request details
+app.use((req, res, next) => {
+  try {
+    req.requestId = crypto.randomUUID ? crypto.randomUUID() : require('crypto').randomBytes(8).toString('hex');
+  } catch (e) {
+    req.requestId = Date.now().toString(36);
+  }
+  req._startTime = Date.now();
+
+  const remoteIp = req.headers['x-forwarded-for'] || req.socket && req.socket.remoteAddress || req.ip;
+  debugLog(req.requestId, 'Incoming', req.method, req.originalUrl, 'from', remoteIp);
+  debugLog(req.requestId, 'Headers:', Object.assign({}, req.headers));
+  // Don't log huge bodies fully — show length and a safe preview
+  if (req.body) {
+    try {
+      const bodyStr = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+      const preview = bodyStr.length > 1000 ? bodyStr.slice(0, 1000) + '...<truncated>' : bodyStr;
+      debugLog(req.requestId, 'Body size:', Buffer.byteLength(bodyStr, 'utf8'), 'preview:', preview);
+    } catch (e) {
+      debugLog(req.requestId, 'Body: <unserializable>');
+    }
+  }
+  // hook into response finish to log outcome and duration
+  res.on('finish', () => {
+    const durationMs = Date.now() - req._startTime;
+    debugLog(req.requestId, 'Response', res.statusCode, 'completed in', durationMs + 'ms');
+  });
+
+  next();
+});
+
 // Security: Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -63,31 +104,36 @@ function releaseLock() {
 }
 
 // Execute shell commands with proper error handling
-function execPromise(command, cwd) {
+function execPromise(command, cwd, requestId) {
   return new Promise((resolve, reject) => {
+    debugLog(requestId, 'Exec start:', command, 'cwd=', cwd);
     const child = exec(command, { cwd, timeout: 300000 }); // 5 minute timeout
     let stdout = '';
     let stderr = '';
     
     child.stdout.on('data', (data) => {
       stdout += data;
-      console.log(`[STDOUT] ${data}`);
+      debugLog(requestId, `[STDOUT] ${data}`);
     });
     
     child.stderr.on('data', (data) => {
       stderr += data;
-      console.error(`[STDERR] ${data}`);
+      debugLog(requestId, `[STDERR] ${data}`);
     });
     
     child.on('close', (code) => {
+      debugLog(requestId, 'Exec finished:', command, 'code=', code);
       if (code === 0) {
         resolve(stdout);
       } else {
-        reject(new Error(`Command failed with code ${code}: ${stderr}`));
+        const err = new Error(`Command failed with code ${code}: ${stderr}`);
+        debugLog(requestId, 'Exec error:', err.message);
+        reject(err);
       }
     });
     
     child.on('error', (error) => {
+      debugLog(requestId, 'Exec process error:', error && error.message);
       reject(error);
     });
   });
@@ -95,20 +141,29 @@ function execPromise(command, cwd) {
 
 // Verify GitHub webhook signature
 function verifySignature(payload, signature, secret) {
-  const expectedSignature = 'sha256=' + 
-    crypto.createHmac('sha256', secret)
-          .update(payload)
-          .digest('hex');
-  log('Expected signature:', expectedSignature);
-  log('Actual signature:', signature);
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expectedSignature)
-  );
+  try {
+    const expectedHex = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+    const expectedSignature = 'sha256=' + expectedHex;
+    log('verifySignature expected:', expectedSignature);
+    log('verifySignature actual:', signature);
+    if (!signature || typeof signature !== 'string') return false;
+    // timingSafeEqual requires equal-length buffers
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedSignature);
+    if (sigBuf.length !== expBuf.length) {
+      log('Signature length mismatch');
+      return false;
+    }
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch (e) {
+    log('Signature verification error:', e && e.message);
+    return false;
+  }
 }
 
 // Main deployment function
-async function deployProject(projectName, branch = 'main') {
+async function deployProject(projectName, branch = 'main', requestId) {
+  requestId = requestId || 'no-req-id';
   const project = PROJECTS[projectName];
   if (!project) {
     throw new Error(`Project ${projectName} not configured`);
@@ -119,15 +174,15 @@ async function deployProject(projectName, branch = 'main') {
   }
 
   console.log(`Starting deployment for ${projectName} on branch ${branch}`);
-  
+  debugLog(requestId, `Starting deployment for ${projectName} on branch ${branch}`);
   try {
     // Git operations
-    await execPromise('git fetch --all', project.dir);
-    await execPromise(`git reset --hard origin/${branch}`, project.dir);
+    await execPromise('git fetch --all', project.dir, requestId);
+    await execPromise(`git reset --hard origin/${branch}`, project.dir, requestId);
     
     // Install dependencies
 //    await execPromise('npm ci --prefer-offline --no-audit --progress=false', project.dir);
-    await execPromise('npm i', project.dir);
+    await execPromise('npm i', project.dir, requestId);
     
     // Build if needed (optional)
 //    if (fs.existsSync(path.join(project.dir, 'package.json'))) {
@@ -135,24 +190,24 @@ async function deployProject(projectName, branch = 'main') {
 if (fs.existsSync(path.join(project.dir, 'package.json'))) {
       const packageJson = JSON.parse(await fsp.readFile(path.join(project.dir, 'package.json'), 'utf8'));
       if (packageJson.scripts && packageJson.scripts.build) {
-        await execPromise('npm run build', project.dir);
+        await execPromise('npm run build', project.dir, requestId);
       }
     }
     
     // Restart PM2
-    await execPromise(`pm2 restart ${project.pm2Name}`, project.dir);
+    await execPromise(`pm2 restart ${project.pm2Name}`, project.dir, requestId);
     
-    console.log(`Deployment completed for ${projectName}`);
+    debugLog(requestId, `Deployment completed for ${projectName}`);
     return `Successfully deployed ${projectName}`;
     
   } catch (error) {
-    console.error(`Deployment failed for ${projectName}:`, error);
+    debugLog(requestId, `Deployment failed for ${projectName}:`, error && error.message);
     
     // Try to restart PM2 anyway to recover from partial failures
     try {
-      await execPromise(`pm2 restart ${project.pm2Name}`, project.dir);
+      await execPromise(`pm2 restart ${project.pm2Name}`, project.dir, requestId);
     } catch (restartError) {
-      console.error(`Failed to restart PM2 after deployment failure:`, restartError);
+      debugLog(requestId, `Failed to restart PM2 after deployment failure:`, restartError && restartError.message);
     }
     
     throw error;
